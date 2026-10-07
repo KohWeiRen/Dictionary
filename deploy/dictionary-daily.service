@@ -1,0 +1,10 @@
+[Unit]
+Description=Send daily English and Spanish practice to Telegram
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/Dictionary
+ExecStart=/home/pi/Dictionary/.venv/bin/python get_random_word_daily.py

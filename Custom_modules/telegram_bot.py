@@ -3,10 +3,14 @@ from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 import asyncio, os
+import logging
+from io import BytesIO
 from important_info.API_loader import env
 
+logger = logging.getLogger(__name__)
+
 BOT_USERNAME : Final = "@Recapoman_bot" 
-OWNER_ID : Final = int(env("BOT_OWNER_ID"))
+OWNER_ID : Final = int(os.getenv("BOT_OWNER_ID") or "0")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
@@ -96,7 +100,30 @@ async def _send_async(text: str, chat: str | None):
             chat_id = (await bot.get_chat(chat)).id
         else:
             chat_id = int(chat)
-        await bot.send_message(chat_id=chat_id, text=text, disable_web_page_preview=True)
+        for start in range(0, len(text), 4096):
+            await bot.send_message(chat_id=chat_id, text=text[start:start + 4096], disable_web_page_preview=True)
+
+
+async def send_spanish_audio(text: str, chat: int | str | None) -> None:
+    """Upload normal and slow MP3s as Telegram players; leave text usable on failure."""
+    from Custom_modules.spanish_audio import synthesize_spanish
+    token = env("TELEGRAM_API_KEY")
+    chat = chat or env("BOT_OWNER_ID")
+    async with Bot(token) as bot:
+        chat_id = (await bot.get_chat(chat)).id if isinstance(chat, str) and chat.startswith("@") else int(chat)
+        for slow, label in ((False, "normal speed"), (True, "slow practice")):
+            try:
+                content = await asyncio.to_thread(synthesize_spanish, text, slow)
+                stream = BytesIO(content)
+                stream.name = "spanish-slow.mp3" if slow else "spanish-normal.mp3"
+                await bot.send_audio(chat_id=chat_id, audio=stream,
+                                     title=f"Spanish · {label}", performer="Dictionary Bot",
+                                     caption=f"🇪🇸 {label}\n{text}", read_timeout=30, write_timeout=30)
+            except Exception as exc:
+                logger.warning("Spanish audio unavailable (%s)", type(exc).__name__)
+                await bot.send_message(chat_id=chat_id,
+                                       text=f"Spanish audio ({label}) is temporarily unavailable. Retry with /listen, or /lesson YYYY-MM-DD for a saved lesson.")
+                break
     
 def run_bot(app) -> None:
     print("running bot...")

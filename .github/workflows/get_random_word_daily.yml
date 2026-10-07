@@ -1,13 +1,17 @@
-name: Get random spanish and english word daily
+name: Daily vocabulary and Spanish practice
 
 on:
   schedule:
-    - cron: "0 22 * * *"   # At 01:00 AM, between day 1 and 31 of the month, Monday through Sunday, January through December
-  workflow_dispatch:           # allow manual trigger
+    - cron: "0 22 * * *"   # 06:00 Asia/Singapore; GitHub may delay scheduled runs
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: dictionary-daily
+      cancel-in-progress: false
 
     steps:
       - name: Checkout repository  # select the repository to use
@@ -27,4 +31,13 @@ jobs:
           BOT_OWNER_ID: ${{ secrets.BOT_OWNER_ID }}
           MERRIAM_WEBSTER_DICT_API: ${{ secrets.MERRIAM_WEBSTER_DICT_API}}
           MERRIAM_WEBSTER_SPANISH_DICT_API: ${{ secrets.MERRIAM_WEBSTER_SPANISH_DICT_API}}
-        run: python get_random_word_daily.py
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_DATABASE: "true"
+          AI_DAILY_LIMIT: ${{ vars.AI_DAILY_LIMIT }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          SPANISH_LEVEL: ${{ vars.SPANISH_LEVEL }}
+          LEARNING_START_DATE: ${{ vars.LEARNING_START_DATE }}
+        run: |
+          python get_random_word_daily.py --check
+          python get_random_word_daily.py

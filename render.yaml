@@ -1,0 +1,35 @@
+# Reference for the EXISTING Render service; do not create a second Telegram bot.
+# Existing service: retain its webhook URL and WEBHOOK_SECRET.
+services:
+  - type: web
+    name: dictionary
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: REQUIRE_DATABASE
+        value: "true"
+      - key: GEMINI_MODEL
+        value: gemini-3.8-flash
+      - key: SPANISH_LEVEL
+        value: A1
+      - key: AI_DAILY_LIMIT
+        value: "20"
+      - key: TELEGRAM_API_KEY
+        sync: false
+      - key: BOT_OWNER_ID
+        sync: false
+      - key: MERRIAM_WEBSTER_DICT_API
+        sync: false
+      - key: MERRIAM_WEBSTER_SPANISH_DICT_API
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false

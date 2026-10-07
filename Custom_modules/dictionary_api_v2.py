@@ -1,18 +1,19 @@
 # Custom_modules/dictionary_api_v2.py
 from __future__ import annotations
 import re
+import os
 import httpx
 from typing import Any, Dict, List, Optional
 from important_info.API_loader import env
 
-MW_EN_KEY = env("MERRIAM_WEBSTER_DICT_API")
-MW_ES_KEY = env("MERRIAM_WEBSTER_SPANISH_DICT_API")
+MW_EN_KEY = os.getenv("MERRIAM_WEBSTER_DICT_API")
+MW_ES_KEY = os.getenv("MERRIAM_WEBSTER_SPANISH_DICT_API")
 
 _FLAG = {"en": "🇬🇧", "es": "🇪🇸"}
 
 # -------------------- helpers: MW audio URL + tag cleaner --------------------
 
-def _mw_audio_url(audio: str) -> str:
+def _mw_audio_url(audio: str, language: str = "en") -> str:
     """
     Build MW audio URL per their rules.
     https://dictionaryapi.com/products/json#sec-2.audio
@@ -25,7 +26,8 @@ def _mw_audio_url(audio: str) -> str:
         sub = "number"
     else:
         sub = audio[0]
-    return f"https://media.merriam-webster.com/audio/prons/en/us/mp3/{sub}/{audio}.mp3"
+    locale = "es/me" if language == "es" else "en/us"
+    return f"https://media.merriam-webster.com/audio/prons/{locale}/mp3/{sub}/{audio}.mp3"
 
 _TAG_PAT = re.compile(r"\{.*?\}")
 
@@ -190,18 +192,20 @@ def _extract_senses(sseq: Any, include_gender: bool = True) -> List[Dict[str, An
 # -------------------- fetchers (return RAW JSON) -----------------------------
 
 def fetch_mw_english_json(word: str, timeout: float = 15) -> Any:
-    url = f"https://www.dictionaryapi.com/api/v3/references/collegiate/json/{word}?key={MW_EN_KEY}"
+    key = MW_EN_KEY or env("MERRIAM_WEBSTER_DICT_API")
+    url = f"https://www.dictionaryapi.com/api/v3/references/collegiate/json/{word}?key={key}"
     with httpx.Client(timeout=timeout) as client:
         r = client.get(url)
         r.raise_for_status()
         return r.json()
 
 def fetch_mw_spanish_json(word: str, timeout: float = 15) -> Any:
-    url = f"https://www.dictionaryapi.com/api/v3/references/spanish/json/{word}?key={MW_ES_KEY}"
+    key = MW_ES_KEY or env("MERRIAM_WEBSTER_SPANISH_DICT_API")
+    url = f"https://www.dictionaryapi.com/api/v3/references/spanish/json/{word}?key={key}"
     with httpx.Client(timeout=timeout) as client:
         r = client.get(url)
         r.raise_for_status()
-        return r.json()
+        return mw_entries_for_language(r.json(), "es")
 
 def fetch_en_example(word: str, timeout: float = 10) -> Optional[str]:
     """
@@ -231,16 +235,41 @@ def fetch_en_example(word: str, timeout: float = 10) -> Optional[str]:
 
 # -------------------- examples helper ----------------------------------------
 
-def _first_entry(data: Any) -> Dict[str, Any]:
+def mw_entries_for_language(data: Any, language: str) -> Any:
+    """The Spanish endpoint is bidirectional; never teach its English entries."""
+    if mw_response_kind(data) != "entries":
+        return data  # preserve spelling suggestions
+    return [
+        e for e in data if isinstance(e, dict)
+        and ((e.get("meta") or {}).get("lang") == "es" if language == "es"
+             else (e.get("meta") or {}).get("lang", "en") == "en")
+    ]
+
+
+def _first_entry(data: Any, language: Optional[str] = None) -> Dict[str, Any]:
+    if language:
+        data = mw_entries_for_language(data, language)
     if not isinstance(data, list):
         return {}
     return next((e for e in data if isinstance(e, dict)), {})
+
+
+def mw_audio_url(data: Any, language: str) -> Optional[str]:
+    """Find the first available recording, including later pronunciations."""
+    entry = _first_entry(data, language)
+    for pronunciation in (entry.get("hwi") or {}).get("prs") or []:
+        if not isinstance(pronunciation, dict):
+            continue
+        audio = (pronunciation.get("sound") or {}).get("audio")
+        if audio:
+            return _mw_audio_url(audio, language)
+    return None
 
 def mw_examples(data: Any, language: str) -> List[str]:
     """Return every usage example found in the first MW entry (may be empty)."""
     if mw_response_kind(data) != "entries":
         return []
-    entry = _first_entry(data)
+    entry = _first_entry(data, language)
     defs = entry.get("def") or []
     if not (defs and isinstance(defs[0], dict)):
         return []
@@ -250,15 +279,15 @@ def mw_examples(data: Any, language: str) -> List[str]:
         examples.extend(s["examples"])
     return examples
 
-def mw_functional_label(data: Any) -> str:
+def mw_functional_label(data: Any, language: Optional[str] = None) -> str:
     """The part of speech / functional label (fl) of the first entry, lowercased."""
-    return (_first_entry(data).get("fl") or "").lower()
+    return (_first_entry(data, language).get("fl") or "").lower()
 
 def mw_has_definition(data: Any, language: str) -> bool:
     """True if the first entry carries a real definition (sseq senses or shortdef)."""
     if mw_response_kind(data) != "entries":
         return False
-    entry = _first_entry(data)
+    entry = _first_entry(data, language)
     defs = entry.get("def") or []
     if defs and isinstance(defs[0], dict):
         if _extract_senses(defs[0].get("sseq"), include_gender=(language == "es")):
@@ -314,9 +343,10 @@ def format_mw_entries(
     an example sentence sourced elsewhere) is shown so the word always appears
     in context.
     """
+    data = mw_entries_for_language(data, language)
     kind = mw_response_kind(data)
     if kind == "empty":
-        return f"{_FLAG.get(language, '')} No data returned.".strip()
+        return f"{_FLAG.get(language, '')} No {('Spanish' if language == 'es' else 'English')} entry found.".strip()
     if kind == "suggestions":
         return format_suggestions(data, language=language)
 
@@ -329,13 +359,10 @@ def format_mw_entries(
     offensive = bool(meta.get("offensive", False))
 
     ipa = None
-    audio_url = None
+    audio_url = mw_audio_url(data, language)
     prs = hwi.get("prs") or []
     if prs and isinstance(prs[0], dict):
         ipa = prs[0].get("mw")
-        audio = (prs[0].get("sound") or {}).get("audio")
-        if audio:
-            audio_url = _mw_audio_url(audio)
 
     # Definitions: prefer rich def.sseq, fall back to shortdef
     senses: List[Dict[str, Any]] = []
