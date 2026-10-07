@@ -114,6 +114,25 @@ Local preview and Render will share today's lesson if their database URL matches
 
 ## Expected limits and recovery
 
+For a failed Spanish lesson, run **GitHub Actions → Diagnose Spanish AI → Run
+workflow**. It reports `STORAGE OK/FAILED` separately from `GEMINI OK/FAILED`,
+uses one uncached AI request (counted against the shared daily cap), and sends no
+Telegram messages. The equivalent configured-terminal command is:
+
+```bash
+python -m Custom_modules.diagnose
+```
+
+Gemini errors now include a category and reference ID in Telegram. Find the
+matching `gemini_failure` JSON log line in Render for on-demand commands, or in
+GitHub Actions for daily jobs. HTTP errors show the provider status and sanitized
+reason; validation errors show field paths and constraint types. Prompts and
+generated lesson text are not logged. Credentials and URLs in provider error
+messages are redacted. Categories distinguish `request` (e.g. HTTP 400), `auth`,
+`model`, `quota`, `provider`, `timeout`, `network`, malformed responses and failed
+lesson validation. A webhook's HTTP 200 only acknowledges Telegram's update.
+It does not mean the background Gemini request succeeded.
+
 - Render Free still sleeps after idle time. The first command may take about a
   minute to reach the application; the database preserves history through wakeups.
 - Gemini generation and speech synthesis require external services. Free AI

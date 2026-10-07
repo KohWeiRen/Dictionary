@@ -1,5 +1,9 @@
 """Gemini REST structured output using the project's existing httpx dependency."""
 import os
+import json
+import logging
+import re
+import uuid
 from typing import TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -8,10 +12,55 @@ from pydantic import BaseModel, ValidationError
 DEFAULT_MODEL = "gemini-3.8-flash"
 ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
 Result = TypeVar("Result", bound=BaseModel)
+logger = logging.getLogger(__name__)
 
 
 class AIUnavailable(RuntimeError):
-    """Safe to show in Telegram: never includes provider bodies or API keys."""
+    """Safe Telegram message; logs contain matching diagnostic reference."""
+
+
+def _safe(value, limit=700) -> str:
+    text = str(value)
+    # Provider errors may echo configuration, including credentials.
+    for name in ("GEMINI_API_KEY", "DATABASE_URL", "TELEGRAM_API_KEY", "WEBHOOK_SECRET"):
+        secret = os.getenv(name, "")
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    text = re.sub(r"AIza[\w-]{15,}", "[redacted]", text)
+    text = re.sub(r"(?:postgres(?:ql)?://|https?://)\S+", "[url redacted]", text)
+    text = re.sub(r"(?i)(?:api[_ -]?key|token|password)\s*[=:]\s*[^\s,;]+", "credential=[redacted]", text)
+    return " ".join(text.split())[:limit]
+
+
+def _provider_schema(schema: type[BaseModel]) -> dict:
+    """Keep string length checks locally; express them as provider guidance.
+
+    Gemini documents a JSON Schema subset without minLength/maxLength. Sending
+    those constraints verbatim can cause rejection or leave them unenforced.
+    """
+    def convert(value):
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        # Property names are data, not schema keywords.
+        result = {}
+        for key, item in value.items():
+            if key in ("minLength", "maxLength"):
+                continue
+            if key in ("properties", "$defs"):
+                result[key] = {name: convert(child) for name, child in item.items()}
+            else:
+                result[key] = convert(item)
+        if "maxLength" in value or "minLength" in value:
+            limits = []
+            if value.get("minLength"):
+                limits.append(f"at least {value['minLength']}")
+            if "maxLength" in value:
+                limits.append(f"at most {value['maxLength']}")
+            result["description"] = (result.get("description", "") + " Use " + " and ".join(limits) + " characters.").strip()
+        return result
+    return convert(schema.model_json_schema())
 
 
 def generate_json(system: str, prompt: str | list[dict], schema: type[Result]) -> Result:
@@ -20,31 +69,87 @@ def generate_json(system: str, prompt: str | list[dict], schema: type[Result]) -
         raise AIUnavailable("Spanish AI isn't configured yet. Set GEMINI_API_KEY on Render and in GitHub Actions secrets, then retry /lesson.")
     from Custom_modules.learning_store import reserve_request
     reserve_request()
+    model = (os.getenv("GEMINI_MODEL") or DEFAULT_MODEL).strip()
+    reference = uuid.uuid4().hex[:8]
+
+    def fail(category, message, **details):
+        record = {"event": "gemini_failure", "ref": reference, "model": _safe(model, 100), "category": category}
+        record.update(details)
+        logger.error("%s", json.dumps(record, ensure_ascii=False))
+        raise AIUnavailable(f"{message} [Gemini: {category}; ref {reference}]") from None
+
     body = {
-        "model": os.getenv("GEMINI_MODEL") or DEFAULT_MODEL,
+        "model": model,
         "system_instruction": system,
         "input": prompt,
         "store": False,
         "generation_config": {"max_output_tokens": 8192},
-        "response_format": {"type": "text", "mime_type": "application/json", "schema": schema.model_json_schema()},
+        "response_format": {"type": "text", "mime_type": "application/json", "schema": _provider_schema(schema)},
     }
     try:
         with httpx.Client(timeout=httpx.Timeout(60, connect=10)) as client:
             response = client.post(ENDPOINT, headers={"x-goog-api-key": key}, json=body)
-        if response.status_code == 429:
-            raise AIUnavailable("Gemini's free quota is temporarily exhausted. Try later; saved lessons and pronunciation still work.")
-        if response.status_code in (401, 403):
-            raise AIUnavailable("Gemini rejected the API key or project access. Check GEMINI_API_KEY and the project in AI Studio.")
-        if response.status_code == 404:
-            raise AIUnavailable("The configured Gemini model is unavailable. Check GEMINI_MODEL against Google's model list.")
-        response.raise_for_status()
+    except httpx.TimeoutException as error:
+        fail("timeout", "Gemini timed out before returning a lesson. Try again later.", error_type=type(error).__name__)
+    except httpx.HTTPError as error:
+        fail("network", "The bot couldn't connect to Gemini. Try again later.", error_type=type(error).__name__)
+
+    if response.is_error:
+        try:
+            payload = response.json()
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            error = error if isinstance(error, dict) else {}
+        except ValueError:
+            error = {}
+        status = response.status_code
+        provider_status = _safe(error.get("status", "unspecified"), 80)
+        reason = _safe(error.get("message", "No provider explanation returned."))
+        details = {"http_status": status, "provider_status": provider_status, "reason": reason}
+        if status == 429:
+            category, message = "quota", "Gemini's rate or quota limit was reached. Try later; saved lessons still work."
+        elif status in (401, 403):
+            category, message = "auth", "Gemini rejected the API key or project access. Check the key in AI Studio."
+        elif status == 404:
+            category, message = "model", f"Gemini couldn't find the configured model ({_safe(model, 100)}) or API endpoint."
+        elif status in (400, 422):
+            category, message = "request", "Gemini rejected the request."
+        else:
+            category, message = "provider", "Gemini returned a service error. Try again later."
+        fail(category, f"{message} HTTP {status} / {provider_status}: {reason[:250]}", **details)
+
+    try:
         result = response.json()
-        if result.get("status") != "completed":
-            raise AIUnavailable("Gemini couldn't complete this response. Please retry later.")
-        parts = [part["text"] for step in result.get("steps", []) if step.get("type") == "model_output"
-                 for part in step.get("content", []) if part.get("type") == "text" and isinstance(part.get("text"), str)]
+    except ValueError:
+        fail("response_json", "Gemini returned a response that wasn't valid JSON.", http_status=response.status_code)
+    if not isinstance(result, dict):
+        fail("response_shape", "Gemini returned an unexpected response format.", http_status=response.status_code)
+    status = result.get("status")
+    if status != "completed":
+        safe_status = _safe(status or "missing", 80)
+        fail("incomplete", f"Gemini didn't finish the response (status: {safe_status}). Try later.", interaction_status=safe_status)
+
+    parts = []
+    steps = result.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, dict) or step.get("type") != "model_output":
+                continue
+            content = step.get("content")
+            if isinstance(content, list):
+                parts.extend(part["text"] for part in content if isinstance(part, dict)
+                             and part.get("type") == "text" and isinstance(part.get("text"), str))
+    # Older Interactions deployments used outputs instead of steps.
+    if not parts and isinstance(result.get("outputs"), list):
+        parts = [part["text"] for part in result["outputs"] if isinstance(part, dict)
+                 and part.get("type") == "text" and isinstance(part.get("text"), str)]
+    if not parts:
+        fail("empty_output", "Gemini finished but returned no lesson text.", interaction_status="completed")
+    try:
         return schema.model_validate_json("".join(parts))
-    except AIUnavailable:
-        raise
-    except (httpx.HTTPError, ValueError, ValidationError, TypeError, AttributeError, KeyError):
-        raise AIUnavailable("Spanish AI is temporarily unavailable or returned an incomplete lesson. Try again later.") from None
+    except ValidationError as error:
+        fields = [{"field": _safe(".".join(str(item) for item in entry["loc"]) or "lesson", 100),
+                   "type": _safe(entry["type"], 80)}
+                  for entry in error.errors(include_input=False, include_context=False, include_url=False)[:8]]
+        category = "output_json" if any(item["type"] == "json_invalid" for item in fields) else "validation"
+        summary = "; ".join(f"{item['field']} ({item['type']})" for item in fields[:3])
+        fail(category, f"Gemini returned an invalid lesson: {summary}. Try /lesson again.", fields=fields)
