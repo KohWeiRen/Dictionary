@@ -83,3 +83,90 @@ class GeminiDiagnosticsTests(IsolatedStore, unittest.TestCase):
         self.assertIn("STORAGE OK", output.getvalue())
         self.assertIn("GEMINI OK", output.getvalue())
         self.assertNotIn("test-secret-api-key", output.getvalue())
+
+
+class ModelFallbackTests(IsolatedStore, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        settings = patch.dict(os.environ, {"GEMINI_FALLBACK_MODELS": ""})
+        settings.start()
+        self.addCleanup(settings.stop)
+
+    def run_responses(self, results):
+        client = MagicMock()
+        post = client.__enter__.return_value.post
+        post.side_effect = results
+        return patch.object(gemini.httpx, "Client", return_value=client), post
+
+    def attempted_models(self, post):
+        return [call.kwargs["json"]["model"] for call in post.call_args_list]
+
+    def request_count(self):
+        with store.database() as db:
+            return db.execute("SELECT count FROM requests WHERE day=?", (store.local_today().isoformat(),)).fetchone()["count"]
+
+    def test_overload_falls_back_and_returns_valid_lesson(self):
+        context, post = self.run_responses([response({}, status=503), response(LESSON_DATA)])
+        with context, self.assertLogs(gemini.logger, level="WARNING") as captured:
+            result = gemini.generate_json("tutor", "lesson", lessons.SpanishLesson)
+        self.assertEqual(result, lesson())
+        self.assertEqual(self.attempted_models(post), ["gemini-3.8-flash", "gemini-3.7-flash"])
+        self.assertEqual(self.request_count(), 2)
+        records = [json.loads(item.getMessage()) for item in captured.records]
+        self.assertEqual(records[-1]["event"], "gemini_fallback_success")
+        self.assertEqual(records[0]["ref"], records[-1]["ref"])
+
+    def test_success_on_primary_uses_one_attempt(self):
+        context, post = self.run_responses([response(LESSON_DATA)])
+        with context:
+            self.assertEqual(gemini.generate_json("tutor", "lesson", lessons.SpanishLesson), lesson())
+        self.assertEqual(self.attempted_models(post), ["gemini-3.8-flash"])
+        self.assertEqual(self.request_count(), 1)
+
+    def test_http_200_with_invalid_lesson_does_not_end_fallback(self):
+        context, post = self.run_responses([response({"title": "missing fields"}), response(LESSON_DATA)])
+        with context, self.assertLogs(gemini.logger, level="WARNING"):
+            self.assertEqual(gemini.generate_json("tutor", "lesson", lessons.SpanishLesson), lesson())
+        self.assertEqual(post.call_count, 2)
+
+    def test_all_models_fail_without_looping_or_repeating(self):
+        context, post = self.run_responses([response({}, status=503)] * 3)
+        with context, self.assertLogs(gemini.logger, level="ERROR"):
+            with self.assertRaises(gemini.AIUnavailable) as error:
+                gemini.generate_json("tutor", "lesson", lessons.SpanishLesson)
+        self.assertEqual(self.attempted_models(post), list(gemini.FREE_TIER_MODELS))
+        self.assertIn("All 3", str(error.exception))
+        self.assertIn("HTTP 503", str(error.exception))
+        self.assertEqual(self.request_count(), 3)
+
+    def test_key_quota_and_bad_request_errors_stop_without_fallback(self):
+        for status in (400, 401, 403, 429):
+            context, post = self.run_responses([response({}, status=status)])
+            with context, self.assertLogs(gemini.logger, level="ERROR"), self.assertRaises(gemini.AIUnavailable):
+                gemini.generate_json("tutor", "lesson", lessons.SpanishLesson)
+            self.assertEqual(post.call_count, 1)
+
+    def test_bot_daily_cap_is_checked_for_every_fallback_attempt(self):
+        context, post = self.run_responses([response({}, status=503)] * 3)
+        with patch.dict(os.environ, {"AI_DAILY_LIMIT": "2"}), context, self.assertLogs(gemini.logger, level="ERROR"):
+            with self.assertRaises(gemini.AIUnavailable) as error:
+                gemini.generate_json("tutor", "lesson", lessons.SpanishLesson)
+        self.assertIn("Today's AI request limit", str(error.exception))
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(self.request_count(), 2)
+
+    def test_missing_model_and_timeout_try_next_model(self):
+        for first in (response({}, status=404), httpx.ReadTimeout("timeout")):
+            context, post = self.run_responses([first, response(LESSON_DATA)])
+            with context, self.assertLogs(gemini.logger, level="WARNING"):
+                self.assertEqual(gemini.generate_json("tutor", "lesson", lessons.SpanishLesson), lesson())
+            self.assertEqual(post.call_count, 2)
+
+    def test_configuration_deduplicates_and_limits_attempts(self):
+        with patch.dict(os.environ, {"GEMINI_FALLBACK_MODELS": "gemini-3.8-flash,gemini-3.7-flash,gemini-3.7-flash,gemini-3.6-flash"}):
+            self.assertEqual(gemini.model_sequence(), gemini.FREE_TIER_MODELS)
+        with patch.dict(os.environ, {"GEMINI_FALLBACK_MODELS": "none"}):
+            self.assertEqual(gemini.model_sequence(), ("gemini-3.8-flash",))
+        with patch.dict(os.environ, {"GEMINI_FALLBACK_MODELS": "unverified-model"}):
+            with self.assertRaises(gemini.AIUnavailable):
+                gemini.model_sequence()

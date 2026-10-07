@@ -40,6 +40,7 @@ Optional Actions **Variables**:
 | Variable | Default |
 | --- | --- |
 | `GEMINI_MODEL` | `gemini-3.8-flash` |
+| `GEMINI_FALLBACK_MODELS` | Unset: tries the remaining models from `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`; use `none` to disable |
 | `SPANISH_LEVEL` | `A1` |
 | `AI_DAILY_LIMIT` | `20` attempted AI calls per Singapore day |
 | `LEARNING_START_DATE` | `2026-10-07`, anchors the English rotation |
@@ -116,7 +117,7 @@ Local preview and Render will share today's lesson if their database URL matches
 
 For a failed Spanish lesson, run **GitHub Actions → Diagnose Spanish AI → Run
 workflow**. It reports `STORAGE OK/FAILED` separately from `GEMINI OK/FAILED`,
-uses one uncached AI request (counted against the shared daily cap), and sends no
+uses up to three uncached AI attempts (each counted against the shared daily cap), and sends no
 Telegram messages. The equivalent configured-terminal command is:
 
 ```bash
@@ -132,6 +133,15 @@ messages are redacted. Categories distinguish `request` (e.g. HTTP 400), `auth`,
 `model`, `quota`, `provider`, `timeout`, `network`, malformed responses and failed
 lesson validation. A webhook's HTTP 200 only acknowledges Telegram's update.
 It does not mean the background Gemini request succeeded.
+
+Temporary provider failures (including HTTP 503), timeouts, missing models and
+invalid lesson output trigger model fallback. The default order is
+`gemini-3.8-flash` → `gemini-3.7-flash` → `gemini-3.6-flash`, with one attempt per
+model and at most three total. Each supports the same structured lesson request
+and currently has free-tier pricing. Authentication, invalid-request and provider
+quota errors stop immediately. A successful fallback logs `gemini_fallback_success`
+with the selected model and the same reference ID as previous failures. No extra
+environment setting is required to activate fallback after deploying this code.
 
 - Render Free still sleeps after idle time. The first command may take about a
   minute to reach the application; the database preserves history through wakeups.

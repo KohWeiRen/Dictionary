@@ -36,6 +36,7 @@ jobs:
           REQUIRE_DATABASE: "true"
           AI_DAILY_LIMIT: ${{ vars.AI_DAILY_LIMIT }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_FALLBACK_MODELS: ${{ vars.GEMINI_FALLBACK_MODELS }}
           SPANISH_LEVEL: ${{ vars.SPANISH_LEVEL }}
           LEARNING_START_DATE: ${{ vars.LEARNING_START_DATE }}
         run: |

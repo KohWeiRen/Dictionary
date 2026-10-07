@@ -11,12 +11,13 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
-      - name: Check shared database and one Gemini lesson
+      - name: Check shared database and Gemini model fallback
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_OWNER_ID: ${{ secrets.BOT_OWNER_ID }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GEMINI_FALLBACK_MODELS: ${{ vars.GEMINI_FALLBACK_MODELS }}
           SPANISH_LEVEL: ${{ vars.SPANISH_LEVEL }}
           AI_DAILY_LIMIT: ${{ vars.AI_DAILY_LIMIT }}
           REQUIRE_DATABASE: "true"

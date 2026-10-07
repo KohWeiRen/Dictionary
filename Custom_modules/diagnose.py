@@ -1,13 +1,18 @@
-"""Check storage, then make one uncached AI request without sending Telegram."""
+"""Check storage and model fallback without sending Telegram."""
 import os
 from important_info import API_loader
 from Custom_modules import learning_store as store
-from Custom_modules.gemini_client import AIUnavailable, generate_json
+from Custom_modules.gemini_client import AIUnavailable, generate_json, model_sequence, _safe
 from Custom_modules.spanish_lessons import SYSTEM, SpanishLesson
 
 
 def main() -> int:
-    print("Diagnostic: one Gemini request; no Telegram messages or lesson/history writes.", flush=True)
+    print("Diagnostic: up to three Gemini attempts; no Telegram messages or lesson/history writes.", flush=True)
+    try:
+        print("Model order: " + " -> ".join(_safe(model, 100) for model in model_sequence()), flush=True)
+    except AIUnavailable as error:
+        print(f"CONFIGURATION FAILED: {error}", flush=True)
+        return 1
     print("Gemini key: " + ("configured" if os.getenv("GEMINI_API_KEY", "").strip() else "missing"), flush=True)
     try:
         store.initialize()

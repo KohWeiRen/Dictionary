@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 TEST_ENV = {
+    "GEMINI_MODEL": "gemini-3.8-flash", "GEMINI_FALLBACK_MODELS": "none",
     "DATABASE_URL": "", "RENDER": "", "REQUIRE_DATABASE": "false", "GITHUB_ACTIONS": "",
     "TELEGRAM_API_KEY": "123:test-token", "BOT_OWNER_ID": "123",
     "MERRIAM_WEBSTER_DICT_API": "test", "MERRIAM_WEBSTER_SPANISH_DICT_API": "test",

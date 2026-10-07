@@ -169,7 +169,7 @@ def claim_lesson(chat: int | str, day: datetime.date) -> bool:
     with database() as db:
         row = db.execute("""INSERT INTO generation_locks VALUES (?, ?, ?)
             ON CONFLICT (chat, day) DO UPDATE SET expires=excluded.expires
-            WHERE generation_locks.expires < ? RETURNING chat""", (str(chat), day.isoformat(), now + 120, now)).fetchone()
+            WHERE generation_locks.expires < ? RETURNING chat""", (str(chat), day.isoformat(), now + 300, now)).fetchone()
         return row is not None
 
 

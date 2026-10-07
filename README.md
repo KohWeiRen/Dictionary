@@ -84,8 +84,21 @@ reported clearly and aren't automatically retried.
 
 Requests use Google's current [Interactions API](https://ai.google.dev/gemini-api/docs/interactions-overview)
 with JSON-schema output and local Pydantic validation, through existing `httpx`.
-No separate AI SDK is needed. Lesson generation usually costs one API request
-per day; each conversation reply costs one more. Grammar content is generated,
+No separate AI SDK is needed. A new lesson or conversation reply usually uses
+one API request. If a model is overloaded, times out, cannot be found, or returns
+an invalid lesson, the bot tries the next model: `gemini-3.8-flash` →
+`gemini-3.7-flash` → `gemini-3.6-flash`. These models currently have free-tier
+pricing. It makes at most one attempt per model and three attempts per generation;
+every attempt counts against `AI_DAILY_LIMIT`. HTTP 200 alone is insufficient:
+the response must also finish and pass local schema validation. Authentication,
+invalid-request and provider quota errors stop immediately.
+
+Fallback works without extra configuration. Optionally set
+`GEMINI_FALLBACK_MODELS=gemini-3.7-flash,gemini-3.6-flash` on both hosts to choose
+the order, or `none` to disable it. Fallback entries must be among the three
+verified models above; `GEMINI_MODEL` remains your chosen primary model.
+`gemini_failure` and `gemini_fallback_success` logs share a reference ID and show
+the attempted/successful model. Grammar content is generated,
 so structural validation is not a guarantee of linguistic accuracy.
 
 Spanish sentence audio uses [gTTS](https://gtts.readthedocs.io/), which needs no
@@ -232,7 +245,8 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 Point Telegram at `https://<host>/telegram/<WEBHOOK_SECRET>`. Both runners use
 `Custom_modules/bot_commands.py` for the same commands and voice handling.
 The GitHub Actions sender needs the existing four Telegram/dictionary secrets
-plus `GEMINI_API_KEY`; `GEMINI_MODEL` and `SPANISH_LEVEL` are optional repo variables.
+plus `GEMINI_API_KEY`; `GEMINI_MODEL`, `GEMINI_FALLBACK_MODELS` and `SPANISH_LEVEL`
+are optional repo variables.
 For the existing Render + GitHub setup, configure the same PostgreSQL connection
 on both hosts using [the cloud guide](deploy/CLOUD_SETUP.md). The cloud storage
 adapter is implemented; a real database URL and Gemini key are needed to activate it.
